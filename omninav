@@ -1,0 +1,132 @@
+#!/bin/sh
+
+usage() {
+  echo "omninav - Navigate through sway, hyprland, vim, neovim, tmux and more"
+  echo ""
+  echo "Usage: omninav [options] <dir>"
+  echo "  -h, --help Print this help message"
+  echo "  --debug    Enable debug mode"
+  echo "  dir        One of 'u', 'r', 'd' or 'l'"
+}
+
+# Parse command-line arguments
+
+level=1
+
+while [ "$1" != "" ]; do
+    name=`echo $1 | awk -F= '{print $1}'`
+    value=`echo $1 | awk -F= '{print $2}'`
+    case $name in
+      -h | --help)
+        usage
+        exit
+        ;;
+      --debug)
+        level=0
+        set -e
+        set -x
+        ;;
+      --no-warn)
+        level=3
+        ;;
+      u|r|l|d)
+        dir=$name
+        ;;
+      *)
+        echo "Error: unknown flag '$name'"
+        echo "Type omninav --help to see which options are supported."
+        exit 1
+        ;;
+    esac
+    shift
+done
+
+if [ -z "$dir" ]; then
+  echo "Error: 'dir' is required"
+  exit 1
+fi
+
+# Detect the window manager that we're using
+
+if [ -n "$HYPRLAND_INSTANCE_SIGNATURE" ]; then
+  wm="hypr"
+elif [ -n "$SWAYSOCK" ]; then
+  wm="sway"
+fi
+
+get_descendant_vim_pid() {
+    pid="$1"
+    terms="$2"
+
+    if grep -iqE '^g?(view|n?vim?x?)(diff)?$' "/proc/$pid/comm"; then
+        if embed_pid="$(pgrep --parent "$pid" --full 'nvim --embed')"; then
+            echo "$embed_pid"
+        else
+            echo "$pid"
+        fi
+
+        return 0
+    fi
+
+    for child in $(pgrep --runstates D,I,R,S --terminal "$terms" --parent "$pid"); do
+        if get_descendant_vim_pid "$child" "$terms"; then
+            # already echo'd PID in recursive call
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+focused_pid() {
+  if [ "$wm" = "hypr" ]; then
+    hyprctl activewindow -j | jq -e '.pid'
+  elif [ "$wm" = "sway" ]; then
+    swaymsg -t get_tree | jq -e '.. | select(.focused? == true).pid'
+  else
+    echo "Error: unrecognised window manager '$wm'"
+    return 1
+  fi
+}
+
+log_warn() {
+  if [ "$level" -le 2 ]; then
+    echo "Warning: $1"
+  fi
+}
+
+if focused_pid="$(focused_pid)"; then
+
+    # First try to navigate within Vim/Neovim
+    terms="$(find /dev/pts -type c -not -name ptmx | sed s@^/dev/@@ | tr '\n' ,)"
+    if vim_pid="$(get_descendant_vim_pid "$focused_pid" "$terms")"; then
+        servername_file="${XDG_RUNTIME_DIR:-/tmp}/omninav.$vim_pid.servername"
+        if read -r program servername < "$servername_file"; then
+
+            if [ "$program" = vim ]; then
+                serverarg=--servername
+            elif [ "$program" = nvim ]; then
+                serverarg=--server
+            fi
+
+            if [ -n "$serverarg" ] && [ -n "$servername" ]; then
+                "$program" "$serverarg" "$servername" \
+                    --remote-expr "OmniNav('$dir')" >/dev/null 2>&1 \
+                    && exit 0
+            fi
+        else
+          log_warn "Failed to read $servername_file. Is the Vim plugin installled?"
+        fi
+    fi
+
+fi
+
+if [ "$wm" = "hypr" ]; then
+  hyprctl dispatch movefocus "$dir"
+  exit 0
+elif [ "$wm" = "sway" ]; then
+  swaymgr focus "$dir"
+  exit 0
+fi
+
+exit 1
