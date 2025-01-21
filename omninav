@@ -84,7 +84,6 @@ focused_pid() {
   elif [ "$wm" = "sway" ]; then
     swaymsg -t get_tree | jq -e '.. | select(.focused? == true).pid'
   else
-    echo "Error: unrecognised window manager '$wm'"
     return 1
   fi
 }
